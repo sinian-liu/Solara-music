@@ -5,7 +5,7 @@
 ![Review-ezgif com-optimize](https://github.com/user-attachments/assets/487157de-bf71-4bc9-9e49-16a4f0a14472)
 | | | |
 |:--:|:--:|:--:|
-| <img src="https://github.com/user-attachments/assets/54d1ed31-da1d-427f-ad11-66a26788c838" height="700"/> | <img src="https://github.com/user-attachments/assets/bb092569-0a7f-47f6-b7e9-c07ea56949cf" height="700"/> | <img src="https://github.com/user-attachments/assets/02b830e3-292f-4880-91f2-86ec818b877a" height="700"/> |
+| <img src="https://github.com/user-attachments/assets/5258f64f-732d-4418-8f4f-986a40f0ef1c" height="700"/> | <img src="https://github.com/user-attachments/assets/bb092569-0a7f-47f6-b7e9-c07ea56949cf" height="700"/> | <img src="https://github.com/user-attachments/assets/02b830e3-292f-4880-91f2-86ec818b877a" height="700"/> |
 
 
 ## 🤝 参与贡献
@@ -22,11 +22,13 @@
 - 📱 竖屏移动端：全新竖屏布局匹配移动端手势与屏幕比例，按钮、列表与歌词均针对单手操作优化。
 - 📝 动态歌词视图：逐行滚动高亮，当前行自动聚焦，手动滚动后短暂锁定视图。
 - 📥 多码率下载：可挑选 128K / 192K / 320K / FLAC 等品质并直接获取音频文件。
+- 📤 播放列表导入导出：一键导出当前队列或导入备份的播放列表，快速迁移到其他设备。
 - ☁️ 轻量后端代理：通过 Cloudflare Pages Functions 统一聚合各数据源并处理音频跨域，摆脱浏览器直接访问的限制。
 - 🎨 主题美学：内置亮/暗模式与玻璃拟态界面，桌面与移动端均具备沉浸体验。
 - 📱 竖屏移动端：全新竖屏布局匹配移动端手势与屏幕比例，按钮、列表与歌词均针对单手操作优化。
 - 🖼️ 沉浸式背景：根据当前曲目封面自动取色，实时渲染模糊背景，氛围与音乐保持一致。
 - 🌊 青绿基调：参考 Emby 等播放器打造统一青绿色视觉体系。
+- 🔒 锁屏播放控制：锁屏界面自动显示专辑封面与播放控件，无需解锁即可进行播放控制。
 - 🛠️ 调试控制台：按下 Ctrl + D 呼出实时日志面板，便于排查接口或交互异常。
 
 ## 🚀 快速上手
@@ -39,6 +41,10 @@
 - 🔗 API 基地址定义在 index.html 中的 `API.baseUrl`（约 1300 行），可替换为自建接口域名。
 - 🎚️ 默认主题、播放模式等偏好可在 `state` 初始化逻辑中按需调整。
 
+## 🔐 访问控制设置
+- 在 Cloudflare Pages 项目的 **Settings → Functions → Environment variables** 中新增名为 `PASSWORD` 的环境变量，值为希望设置的访问口令。
+- 变量保存后重新部署站点，未登录的访问者会被自动重定向到 `/login` 页面并需输入该口令。
+- 若后续想关闭访问口令，只需在同一位置删除 `PASSWORD` 环境变量并重新部署。
 ## 🎵 使用流程
 1. 输入关键词并选择想要的曲库后发起搜索。
 2. 在结果列表中可试听、播放、下载或加入播放队列。
