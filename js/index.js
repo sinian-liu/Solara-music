@@ -68,6 +68,7 @@ const dom = {
     mobileQualityLabel: document.getElementById("mobileQualityLabel"),
     mobilePanel: document.getElementById("mobilePanel"),
     mobileQueueToggle: document.getElementById("mobileQueueToggle"),
+    shuffleToggleBtn: document.getElementById("shuffleToggleBtn"),
     searchArea: document.getElementById("searchArea"),
     libraryTabs: Array.from(document.querySelectorAll(".playlist-tab[data-target]")),
     addAllFavoritesBtn: document.getElementById("addAllFavoritesBtn"),
@@ -365,6 +366,14 @@ function safeSetLocalStorage(key, value) {
     }
 }
 
+function safeRemoveLocalStorage(key) {
+    try {
+        localStorage.removeItem(key);
+    } catch (error) {
+        console.warn(`移除本地存储失败: ${key}`, error);
+    }
+}
+
 function parseJSON(value, fallback) {
     if (!value) return fallback;
     try {
@@ -374,6 +383,38 @@ function parseJSON(value, fallback) {
         console.warn("解析本地存储 JSON 失败", error);
         return fallback;
     }
+}
+
+function cloneSearchResults(results) {
+    if (!Array.isArray(results)) {
+        return [];
+    }
+    try {
+        return JSON.parse(JSON.stringify(results));
+    } catch (error) {
+        console.warn("复制搜索结果失败，回退到浅拷贝", error);
+        return results.map((item) => {
+            if (item && typeof item === "object") {
+                return { ...item };
+            }
+            return item;
+        });
+    }
+}
+
+function sanitizeStoredSearchState(data, defaultSource = SOURCE_OPTIONS[0].value) {
+    if (!data || typeof data !== "object") {
+        return null;
+    }
+
+    const keyword = typeof data.keyword === "string" ? data.keyword : "";
+    const sourceValue = typeof data.source === "string" ? data.source : defaultSource;
+    const source = normalizeSource(sourceValue);
+    const page = Number.isInteger(data.page) && data.page > 0 ? data.page : 1;
+    const hasMore = typeof data.hasMore === "boolean" ? data.hasMore : true;
+    const results = cloneSearchResults(data.results);
+
+    return { keyword, source, page, hasMore, results };
 }
 
 function loadStoredPalettes() {
@@ -548,6 +589,18 @@ const savedSearchSource = (() => {
     return normalizeSource(stored);
 })();
 
+const LAST_SEARCH_STATE_STORAGE_KEY = "lastSearchState.v1";
+
+const savedLastSearchState = (() => {
+    const stored = safeGetLocalStorage(LAST_SEARCH_STATE_STORAGE_KEY);
+    const parsed = parseJSON(stored, null);
+    return sanitizeStoredSearchState(parsed, savedSearchSource || SOURCE_OPTIONS[0].value);
+})();
+
+let lastSearchStateCache = savedLastSearchState
+    ? { ...savedLastSearchState, results: cloneSearchResults(savedLastSearchState.results) }
+    : null;
+
 const savedPlaybackTime = (() => {
     const stored = safeGetLocalStorage("currentPlaybackTime");
     const time = Number.parseFloat(stored);
@@ -698,27 +751,29 @@ Object.freeze(API);
 
 const state = {
     onlineSongs: [],
-    searchResults: [],
+    searchResults: cloneSearchResults(savedLastSearchState?.results) || [],
     renderedSearchCount: 0,
     currentTrackIndex: savedCurrentTrackIndex,
     currentAudioUrl: null,
     lyricsData: [],
     currentLyricLine: -1,
     currentPlaylist: savedCurrentPlaylist, // 'online', 'search', or 'playlist'
-    searchPage: 1,
-    searchKeyword: "", // 确保这里有初始值
-    searchSource: savedSearchSource,
-    hasMoreResults: true,
+    searchPage: savedLastSearchState?.page || 1,
+    searchKeyword: savedLastSearchState?.keyword || "", // 确保这里有初始值
+    searchSource: savedLastSearchState ? savedLastSearchState.source : savedSearchSource,
+    hasMoreResults: typeof savedLastSearchState?.hasMore === "boolean" ? savedLastSearchState.hasMore : true,
     currentSong: savedCurrentSong,
     currentArtworkUrl: null,
     debugMode: false,
     isSearchMode: false, // 新增：搜索模式状态
     playlistSongs: savedPlaylistSongs, // 新增：统一播放列表
     playMode: savedPlayMode, // 新增：播放模式 'list', 'single', 'random'
+    playlistLastNonRandomMode: savedPlayMode === "random" ? "list" : savedPlayMode,
     favoriteSongs: savedFavoriteSongs,
     currentFavoriteIndex: savedCurrentFavoriteIndex,
     currentList: savedCurrentList,
     favoritePlayMode: savedFavoritePlayMode,
+    favoriteLastNonRandomMode: savedFavoritePlayMode === "random" ? "list" : savedFavoritePlayMode,
     favoritePlaybackTime: savedFavoritePlaybackTime,
     playbackQuality: savedPlaybackQuality,
     volume: savedVolume,
@@ -770,6 +825,18 @@ saveFavoriteState();
     let handlersBound = false;
     let lastPositionUpdateTime = 0;
     const MEDIA_SESSION_ENDED_FLAG = '__solaraMediaSessionHandledEnded';
+
+    const preferLockScreenTrackControls = (() => {
+        if (typeof navigator === 'undefined') {
+            return false;
+        }
+        const ua = navigator.userAgent || '';
+        const platform = navigator.platform || '';
+        const isIOS = /iP(ad|hone|od)/.test(ua);
+        const isTouchMac = !isIOS && platform === 'MacIntel' && typeof navigator.maxTouchPoints === 'number' && navigator.maxTouchPoints > 1;
+        return isIOS || isTouchMac;
+    })();
+    const allowLockScreenScrubbing = typeof navigator.mediaSession.setPositionState === 'function' && !preferLockScreenTrackControls;
 
     function triggerMediaSessionMetadataRefresh() {
         let refreshed = false;
@@ -855,7 +922,7 @@ saveFavoriteState();
 
     function updatePositionState() {
         // iOS 15+ 支持 setPositionState；用于让锁屏进度条可拖动与显示
-        if (typeof navigator.mediaSession.setPositionState !== 'function') return;
+        if (!allowLockScreenScrubbing) return;
         const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
         const position = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
         const playbackRate = Number.isFinite(audio.playbackRate) ? audio.playbackRate : 1;
@@ -911,15 +978,21 @@ saveFavoriteState();
             navigator.mediaSession.setActionHandler('seekbackward', null);
             navigator.mediaSession.setActionHandler('seekforward', null);
 
-            // 关键：让锁屏支持拖动进度到任意位置
-            navigator.mediaSession.setActionHandler('seekto', (e) => {
-                if (!e || typeof e.seekTime !== 'number') return;
-                audio.currentTime = Math.max(0, Math.min(audio.duration || 0, e.seekTime));
-                if (e.fastSeek && typeof audio.fastSeek === 'function') {
-                    audio.fastSeek(audio.currentTime);
-                }
-                updatePositionState();
-            });
+            if (allowLockScreenScrubbing) {
+                // 关键：让锁屏支持拖动进度到任意位置
+                navigator.mediaSession.setActionHandler('seekto', (e) => {
+                    if (!e || typeof e.seekTime !== 'number') return;
+                    audio.currentTime = Math.max(0, Math.min(audio.duration || 0, e.seekTime));
+                    if (e.fastSeek && typeof audio.fastSeek === 'function') {
+                        audio.fastSeek(audio.currentTime);
+                    }
+                    updatePositionState();
+                });
+            } else {
+                try {
+                    navigator.mediaSession.setActionHandler('seekto', null);
+                } catch (_) {}
+            }
 
             // 可选：切换播放状态（大部分系统自己会处理）
             navigator.mediaSession.setActionHandler('play', async () => {
@@ -1586,13 +1659,17 @@ function toggleSearchMode(enable) {
 }
 
 // 新增：显示搜索结果
-function showSearchResults() {
+function showSearchResults(options = {}) {
+    const { restore = false } = options;
     toggleSearchMode(true);
     if (state.sourceMenuOpen) {
         scheduleSourceMenuPositionUpdate();
     }
     if (state.qualityMenuOpen) {
         schedulePlayerQualityMenuPositionUpdate();
+    }
+    if (restore) {
+        restoreSearchResultsList();
     }
 }
 
@@ -1615,6 +1692,94 @@ function hideSearchResults() {
     closeImportSelectedMenu();
 }
 
+function createSearchStateSnapshot() {
+    return {
+        keyword: typeof state.searchKeyword === "string" ? state.searchKeyword : "",
+        source: normalizeSource(state.searchSource),
+        page: Number.isInteger(state.searchPage) && state.searchPage > 0 ? state.searchPage : 1,
+        hasMore: Boolean(state.hasMoreResults),
+        results: cloneSearchResults(state.searchResults),
+    };
+}
+
+function persistLastSearchState() {
+    const snapshot = createSearchStateSnapshot();
+    if (!snapshot.keyword) {
+        lastSearchStateCache = null;
+        safeRemoveLocalStorage(LAST_SEARCH_STATE_STORAGE_KEY);
+        return;
+    }
+    lastSearchStateCache = { ...snapshot, results: cloneSearchResults(snapshot.results) };
+    safeSetLocalStorage(LAST_SEARCH_STATE_STORAGE_KEY, JSON.stringify(snapshot));
+}
+
+function restoreStateFromSnapshot(snapshot) {
+    const sanitized = sanitizeStoredSearchState(snapshot, state.searchSource || SOURCE_OPTIONS[0].value);
+    if (!sanitized || !sanitized.keyword) {
+        return false;
+    }
+    state.searchKeyword = sanitized.keyword;
+    state.searchSource = sanitized.source;
+    state.searchPage = sanitized.page;
+    state.hasMoreResults = sanitized.hasMore;
+    state.searchResults = cloneSearchResults(sanitized.results);
+    lastSearchStateCache = { ...sanitized, results: cloneSearchResults(sanitized.results) };
+    safeSetLocalStorage("searchSource", state.searchSource);
+    updateSourceLabel();
+    buildSourceMenu();
+    return true;
+}
+
+function restoreSearchResultsList() {
+    const container = dom.searchResultsList || dom.searchResults;
+    if (!container) {
+        return;
+    }
+    if (container.childElementCount > 0) {
+        return;
+    }
+    const results = Array.isArray(state.searchResults) ? state.searchResults : [];
+    state.renderedSearchCount = 0;
+    displaySearchResults(results, {
+        reset: true,
+        totalCount: results.length,
+    });
+}
+
+function handleSearchInputFocus() {
+    if (!dom.searchInput) {
+        return;
+    }
+
+    const currentValue = dom.searchInput.value.trim();
+    if (currentValue && state.searchKeyword && currentValue !== state.searchKeyword) {
+        return;
+    }
+
+    const hasKeyword = typeof state.searchKeyword === "string" && state.searchKeyword.length > 0;
+    const hasResults = Array.isArray(state.searchResults) && state.searchResults.length > 0;
+
+    if (!hasKeyword || !hasResults) {
+        const restored = restoreStateFromSnapshot(lastSearchStateCache);
+        if (!restored) {
+            return;
+        }
+    }
+
+    if (!dom.searchInput.value.trim()) {
+        dom.searchInput.value = state.searchKeyword;
+        window.requestAnimationFrame(() => {
+            try {
+                dom.searchInput.select();
+            } catch (error) {
+                console.warn("选择搜索文本失败", error);
+            }
+        });
+    }
+
+    showSearchResults({ restore: true });
+}
+
 const playModeTexts = {
     "list": "列表循环",
     "single": "单曲循环",
@@ -1631,32 +1796,114 @@ function getActivePlayMode() {
     return state.currentList === "favorite" ? state.favoritePlayMode : state.playMode;
 }
 
+function getLastNonRandomMode() {
+    if (state.currentList === "favorite") {
+        return state.favoriteLastNonRandomMode || "list";
+    }
+    return state.playlistLastNonRandomMode || "list";
+}
+
+function rememberLastNonRandomMode() {
+    const currentMode = getActivePlayMode();
+    if (currentMode === "random") {
+        return;
+    }
+    const mode = currentMode || "list";
+    if (state.currentList === "favorite") {
+        state.favoriteLastNonRandomMode = mode;
+    } else {
+        state.playlistLastNonRandomMode = mode;
+    }
+}
+
+function updateShuffleButtonUI() {
+    const button = dom.shuffleToggleBtn;
+    if (!button) {
+        return;
+    }
+    const mode = getActivePlayMode();
+    const isRandom = mode === "random";
+    button.setAttribute("aria-pressed", isRandom ? "true" : "false");
+    const iconClass = isRandom ? "shuffle-icon shuffle-icon--on" : "shuffle-icon shuffle-icon--off";
+    button.innerHTML = `<i class="fas fa-shuffle ${iconClass}"></i>`;
+    const label = isRandom ? "关闭随机播放" : "开启随机播放";
+    button.title = label;
+    button.setAttribute("aria-label", label);
+}
+
 function updatePlayModeUI() {
     const mode = getActivePlayMode();
-    dom.playModeBtn.innerHTML = `<i class="fas ${playModeIcons[mode] || playModeIcons.list}"></i>`;
-    dom.playModeBtn.title = `播放模式: ${playModeTexts[mode] || playModeTexts.list}`;
+    if (dom.playModeBtn) {
+        dom.playModeBtn.innerHTML = `<i class="fas ${playModeIcons[mode] || playModeIcons.list}"></i>`;
+        dom.playModeBtn.title = `播放模式: ${playModeTexts[mode] || playModeTexts.list}`;
+    }
+    updateShuffleButtonUI();
+}
+
+function setPlayMode(mode, { announce = true } = {}) {
+    const validModes = ["list", "single", "random"];
+    if (!validModes.includes(mode)) {
+        return getActivePlayMode();
+    }
+    const isFavoriteList = state.currentList === "favorite";
+    const key = isFavoriteList ? "favoritePlayMode" : "playMode";
+    const previousMode = state[key];
+    if (previousMode === mode) {
+        updatePlayModeUI();
+        return mode;
+    }
+
+    state[key] = mode;
+    if (mode !== "random") {
+        if (isFavoriteList) {
+            state.favoriteLastNonRandomMode = mode;
+        } else {
+            state.playlistLastNonRandomMode = mode;
+        }
+    }
+
+    if (isFavoriteList) {
+        saveFavoriteState();
+    } else {
+        savePlayerState();
+    }
+
+    updatePlayModeUI();
+
+    if (announce) {
+        const modeText = playModeTexts[mode] || playModeTexts.list;
+        showNotification(`播放模式: ${modeText}`);
+        debugLog(`播放模式切换为: ${mode} (列表: ${state.currentList})`);
+    }
+
+    return mode;
 }
 
 // 新增：播放模式切换
 function togglePlayMode() {
-    const modes = ["list", "single", "random"];
+    const modes = isMobileView ? ["list", "single", "random"] : ["list", "single"];
     const currentMode = getActivePlayMode();
-    const currentIndex = modes.indexOf(currentMode);
+    let currentIndex = modes.indexOf(currentMode);
+    if (currentIndex === -1) {
+        currentIndex = 0;
+    }
     const nextIndex = (currentIndex + 1) % modes.length;
     const nextMode = modes[nextIndex];
-
-    if (state.currentList === "favorite") {
-        state.favoritePlayMode = nextMode;
-        saveFavoriteState();
-    } else {
-        state.playMode = nextMode;
-        savePlayerState();
+    if (nextMode === "random") {
+        rememberLastNonRandomMode();
     }
-    updatePlayModeUI();
+    setPlayMode(nextMode);
+}
 
-    const modeText = playModeTexts[nextMode] || playModeTexts.list;
-    showNotification(`播放模式: ${modeText}`);
-    debugLog(`播放模式切换为: ${nextMode} (列表: ${state.currentList})`);
+function toggleShuffleMode() {
+    const currentMode = getActivePlayMode();
+    if (currentMode === "random") {
+        const fallback = getLastNonRandomMode();
+        setPlayMode(fallback);
+        return;
+    }
+    rememberLastNonRandomMode();
+    setPlayMode("random");
 }
 
 function formatTime(seconds) {
@@ -2356,6 +2603,10 @@ function setupInteractions() {
             }
 
             activatePlaylistItem(index);
+
+            if (event.detail !== 0 && typeof item.blur === "function") {
+                item.blur();
+            }
         };
 
         const handleKeydown = (event) => {
@@ -2712,7 +2963,12 @@ function setupInteractions() {
 
     // 播放模式按钮事件
     updatePlayModeUI();
-    dom.playModeBtn.addEventListener("click", togglePlayMode);
+    if (dom.playModeBtn) {
+        dom.playModeBtn.addEventListener("click", togglePlayMode);
+    }
+    if (dom.shuffleToggleBtn) {
+        dom.shuffleToggleBtn.addEventListener("click", toggleShuffleMode);
+    }
 
     // 搜索相关事件 - 修复搜索下拉框显示问题
     dom.searchBtn.addEventListener("click", (e) => {
@@ -2720,6 +2976,11 @@ function setupInteractions() {
         e.stopPropagation();
         debugLog("搜索按钮被点击");
         performSearch();
+    });
+
+    dom.searchInput.addEventListener("focus", () => {
+        debugLog("搜索输入框获得焦点，尝试恢复上次搜索结果");
+        handleSearchInputFocus();
     });
 
     dom.searchInput.addEventListener("keypress", (e) => {
@@ -3012,6 +3273,7 @@ async function performSearch(isLiveSearch = false) {
             reset: state.searchPage === 1,
             totalCount: state.searchResults.length,
         });
+        persistLastSearchState();
         debugLog(`搜索完成: 总共显示 ${state.searchResults.length} 个结果`);
 
         // 如果没有结果，显示提示
@@ -3062,6 +3324,7 @@ async function loadMoreResults() {
             displaySearchResults(results, {
                 totalCount: state.searchResults.length,
             });
+            persistLastSearchState();
             debugLog(`加载完成: 新增 ${results.length} 个结果`);
         } else {
             state.hasMoreResults = false;
@@ -4106,6 +4369,7 @@ function removeFromPlaylist(index) {
     updatePlaylistActionStates();
     savePlayerState();
     showNotification("已从播放列表移除", "success");
+    clearLyricsIfLibraryEmpty();
 }
 
 function addSongToPlaylist(song) {
@@ -4235,6 +4499,7 @@ function removeFavoriteAtIndex(index) {
     saveFavoriteState();
     renderFavorites();
     updatePlayModeUI();
+    clearLyricsIfLibraryEmpty();
     return removed;
 }
 
@@ -4357,6 +4622,7 @@ function clearFavorites() {
     updateFavoriteIcons();
     updatePlayModeUI();
     showNotification("收藏列表已清空", "success");
+    clearLyricsIfLibraryEmpty();
 }
 
 function exportFavorites() {
@@ -4541,6 +4807,7 @@ function clearPlaylist() {
 
     savePlayerState();
     showNotification("播放列表已清空", "success");
+    clearLyricsIfLibraryEmpty();
 }
 
 // 新增：播放播放列表中的歌曲
@@ -4810,6 +5077,7 @@ function playNext() {
     if (state.currentList === "favorite") {
         const favorites = ensureFavoriteSongsArray();
         if (favorites.length === 0) {
+            clearLyricsIfLibraryEmpty();
             return;
         }
         const mode = state.favoritePlayMode || "list";
@@ -4837,7 +5105,10 @@ function playNext() {
         playlist = state.searchResults;
     }
 
-    if (playlist.length === 0) return;
+    if (playlist.length === 0) {
+        clearLyricsIfLibraryEmpty();
+        return;
+    }
 
     const mode = state.playMode || "list";
     if (mode === "random") {
@@ -4985,6 +5256,16 @@ function pickRandomExploreGenre() {
     return EXPLORE_RADAR_GENRES[index];
 }
 
+const EXPLORE_RADAR_SOURCES = ["netease", "kuwo"];
+
+function pickRandomExploreSource() {
+    if (!Array.isArray(EXPLORE_RADAR_SOURCES) || EXPLORE_RADAR_SOURCES.length === 0) {
+        return "netease";
+    }
+    const index = Math.floor(Math.random() * EXPLORE_RADAR_SOURCES.length);
+    return EXPLORE_RADAR_SOURCES[index];
+}
+
 // 探索雷达：通过代理后端随机搜歌并刷新播放列表
 async function exploreOnlineMusic() {
     const desktopButton = dom.loadOnlineBtn;
@@ -5013,12 +5294,12 @@ async function exploreOnlineMusic() {
         setLoadingState(true);
 
         const randomGenre = pickRandomExploreGenre();
-        const source = state.searchSource || "netease";
+        const source = pickRandomExploreSource();
         const results = await API.search(randomGenre, source, 30, 1);
 
         if (!Array.isArray(results) || results.length === 0) {
             showNotification("探索雷达：未找到歌曲", "error");
-            debugLog(`探索雷达未找到歌曲，关键词：${randomGenre}`);
+            debugLog(`探索雷达未找到歌曲，关键词：${randomGenre}，音源：${source}`);
             return;
         }
 
@@ -5065,7 +5346,7 @@ async function exploreOnlineMusic() {
         updatePlaylistHighlight();
 
         showNotification(`探索雷达：新增${appendedSongs.length}首 ${randomGenre} 歌曲`);
-        debugLog(`探索雷达加载成功，关键词：${randomGenre}，新增歌曲数：${appendedSongs.length}`);
+        debugLog(`探索雷达加载成功，关键词：${randomGenre}，音源：${source}，新增歌曲数：${appendedSongs.length}`);
 
         const shouldAutoplay = existingSongs.length === 0 && state.playlistSongs.length > 0;
         if (shouldAutoplay) {
@@ -5153,6 +5434,26 @@ function clearLyricsContent() {
     state.currentLyricLine = -1;
     if (isMobileView) {
         closeMobileInlineLyrics({ force: true });
+    }
+}
+
+function clearLyricsIfLibraryEmpty() {
+    const playlistEmpty = !Array.isArray(state.playlistSongs) || state.playlistSongs.length === 0;
+    const favoritesEmpty = !Array.isArray(state.favoriteSongs) || state.favoriteSongs.length === 0;
+    if (!playlistEmpty || !favoritesEmpty) {
+        return;
+    }
+
+    const player = dom.audioPlayer;
+    const hasActiveAudio = Boolean(player && player.src && !player.ended && !player.paused);
+    if (hasActiveAudio) {
+        return;
+    }
+
+    clearLyricsContent();
+    if (dom.lyrics) {
+        dom.lyrics.classList.add("empty");
+        dom.lyrics.dataset.placeholder = "default";
     }
 }
 
